@@ -1,6 +1,9 @@
 TARGET := main.bin
 
 %.bin: %.c
-	$(CC) $< -o $@
+	$(CC) $< -g -O0 -o $@
+
+clean:
+	rm $(TARGET)
 
 all: $(TARGET)
