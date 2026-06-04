@@ -43,7 +43,8 @@ void *worker_thread(void *arg)
     struct thread_info *tinfo = (struct thread_info*)arg;
     struct thread_pool *pool = tinfo->pool;
 
-    printf("Worker ready!\n");
+    volatile int i = 0;
+    printf("Worker #%d ready\n", tinfo->thread_idx);
     while (1)
     {
         pthread_mutex_lock(&pool->workload_mutex);
@@ -51,20 +52,20 @@ void *worker_thread(void *arg)
         {
             printf("Worker #%d going to sleep\n", tinfo->thread_idx);
             pthread_cond_wait(&pool->sig_workload_available, &pool->workload_mutex);
-            printf("Worker #%d woke up, fill_idx is %d, next_idx is %d\n", tinfo->thread_idx, pool->workload_fill_idx, pool->next_workload_idx);
+            printf("Worker #%d woke up, fill_idx is %d, next_idx is %d. i is %d\n", tinfo->thread_idx, pool->workload_fill_idx, pool->next_workload_idx, i);
         }
         
         void *(*func)(void*) = pool->workloads[pool->next_workload_idx].func;
         void *arg = pool->workloads[pool->next_workload_idx].arg;
         pool->next_workload_idx++;
-        printf("Worker #%d next_idx after incrementing is %d\n", pool->next_workload_idx);
+        printf("Worker #%d next_idx after incrementing is %d\n", tinfo->thread_idx, pool->next_workload_idx);
         pool->next_workload_idx %= NUM_THREADS;
-        printf("Worker #%d next_idx after mod is %d\n", pool->next_workload_idx);
+        printf("Worker #%d next_idx after mod is %d\n", tinfo->thread_idx, pool->next_workload_idx);
 
         pthread_mutex_unlock(&pool->workload_mutex);
-        printf("Worker #%d starting work on function\n");
+        printf("Worker #%d starting work on function\n", tinfo->thread_idx);
         func(arg);
-        printf("Worker #%d finished work on function\n");
+        printf("Worker #%d finished work on function\n", tinfo->thread_idx);
 
     }
     printf("Worker #%d finished\n", tinfo->thread_idx);
@@ -127,16 +128,15 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
     for (tidx = 0; tidx < num_threads; tidx++)
     {
         tinfos[tidx].thread_idx = tidx;
+        tinfos[tidx].thread_has_work = 0;
+        tinfos[tidx].pool = pool;
+
         res = pthread_create(&tinfos[tidx].thread_handle, NULL, &worker_thread, &tinfos[tidx]);
         if (res != EOK)
         {
             printf("Failed to create thread #%d: %s\n", strerror(res));
             goto out_cleanup_threads;
         }
-
-        tinfos[tidx].thread_handle = 0;
-        tinfos[tidx].thread_has_work = 0;
-        tinfos[tidx].pool = pool;
 
         workloads[tidx].arg = NULL;
         workloads[tidx].func = NULL;
@@ -211,9 +211,9 @@ void *test1(void *arg)
     while (1)
     {
         counter++;
-        if (counter % 10000000ULL == 0)
-            printf("test1 still running\n");
-        if (counter % 10000000000ULL == 0)
+        // if (counter % 10000000ULL == 0)
+            // printf("test1 still running\n");
+        if (counter % 1000000000ULL == 0)
         {
             printf("test1 did %llu iterations\n", counter);
             break;
