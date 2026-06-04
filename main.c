@@ -13,6 +13,8 @@ struct thread_info
 {
     pthread_t thread_handle;
     int thread_has_work;
+    int joined;
+    int exited;
     size_t thread_idx;
     struct thread_pool *pool;
 };
@@ -28,9 +30,10 @@ struct thread_pool
     struct thread_info *tinfos;
     struct workload *workloads;
     pthread_mutex_t workload_mutex;
-    pthread_cond_t sig_workload_available;
+    pthread_cond_t sig_wakeup;
     size_t next_workload_idx;
     size_t workload_fill_idx;
+    int joining;
 };
 
 void *worker_thread(void *arg)
@@ -48,10 +51,15 @@ void *worker_thread(void *arg)
     while (1)
     {
         pthread_mutex_lock(&pool->workload_mutex);
-        while (pool->workload_fill_idx == pool->next_workload_idx)
+        while (pool->workload_fill_idx == pool->next_workload_idx || pool->joining)
         {
-            printf("Worker #%d going to sleep, sig address is 0x%x\n", tinfo->thread_idx, &pool->sig_workload_available);
-            pthread_cond_wait(&pool->sig_workload_available, &pool->workload_mutex);
+            if (pool->joining)
+            {
+                pthread_mutex_unlock(&pool->workload_mutex);
+                goto out;
+            }
+            printf("Worker #%d going to sleep, sig address is 0x%x\n", tinfo->thread_idx, &pool->sig_wakeup);
+            pthread_cond_wait(&pool->sig_wakeup, &pool->workload_mutex);
             printf("Worker #%d woke up, fill_idx is %d, next_idx is %d\n", tinfo->thread_idx, pool->workload_fill_idx, pool->next_workload_idx);
         }
         
@@ -70,6 +78,8 @@ void *worker_thread(void *arg)
         printf("Worker #%d finished work on function\n", tinfo->thread_idx);
     }
 
+out:
+    tinfo->exited = 1;
     printf("Worker #%d finished\n", tinfo->thread_idx);
     return 0;
 }
@@ -95,7 +105,7 @@ int add_workload(struct thread_pool *pool, void *(*func)(void*), void *arg)
     pool->workload_fill_idx %= NUM_THREADS;
     printf("add_workload fill_idx after mod is %d, will signal now\n", pool->workload_fill_idx);
 
-    pthread_cond_signal(&pool->sig_workload_available);
+    pthread_cond_signal(&pool->sig_wakeup);
 
     printf("add_workload, unlock mutex\n");
     pthread_mutex_unlock(&pool->workload_mutex);
@@ -109,6 +119,10 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
         res = EINVAL;
         goto out;
     }
+
+    pool->next_workload_idx = 0;
+    pool->workload_fill_idx = 0;
+    pool->joining = 0;
 
     struct thread_info *tinfos = (struct thread_info*)calloc(num_threads, sizeof(struct thread_info));
     if (tinfos == NULL)
@@ -126,7 +140,7 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
         goto out_cleanup_workloads;
     }
 
-    res = pthread_cond_init(&pool->sig_workload_available, NULL);
+    res = pthread_cond_init(&pool->sig_wakeup, NULL);
     if (res != EOK)
     {
         printf("Failed to initialized cvar: %s\n", strerror(res));
@@ -146,6 +160,7 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
         tinfos[tidx].thread_idx = tidx;
         tinfos[tidx].thread_has_work = 0;
         tinfos[tidx].pool = pool;
+        tinfos[tidx].exited = 0;
 
         res = pthread_create(&tinfos[tidx].thread_handle, NULL, &worker_thread, &tinfos[tidx]);
         if (res != EOK)
@@ -172,14 +187,12 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
 
     pool->tinfos = tinfos;
     pool->workloads = workloads;
-    pool->next_workload_idx = 0;
-    pool->workload_fill_idx = 0;
 
     res = EOK;
     goto out;
 
 out_cleanup_mutex:
-    pthread_cond_destroy(&pool->sig_workload_available);
+    pthread_cond_destroy(&pool->sig_wakeup);
 
 out_cleanup_threads:
     for (size_t i = 0; i < tidx; i++)
@@ -209,11 +222,24 @@ void wait_for_join(struct thread_pool *pool, size_t num_threads)
 {
     printf("Wait for join\n");
     void *res;
-    for (size_t i = 0; i < num_threads; i++)
+    int joined_threads = 0;
+    pool->joining = 1;
+    while (joined_threads != num_threads)
     {
-        printf("Awaiting worker #%d\n", i);
-        pthread_join(pool->tinfos[i].thread_handle, NULL);
-        printf("Worker #%d joined\n", i);
+        for (size_t i = 0; i < num_threads; i++)
+        {
+            if (pool->tinfos[i].joined || pool->tinfos[i].thread_has_work)
+                continue;
+            
+            pthread_cond_signal(&pool->sig_wakeup);
+            if (!pool->tinfos[i].exited)
+                continue;
+
+            pthread_join(pool->tinfos[i].thread_handle, NULL);
+            pool->tinfos[i].joined = 1;
+            printf("Worker #%d joined\n", i);
+            joined_threads++;
+        }
     }
 }
 
@@ -287,7 +313,7 @@ int main(void)
 
     handle_incoming();
 
-    // wait_for_join(&pool, num_threads);
+    wait_for_join(&pool, num_threads);
 
     return 0;
 }
