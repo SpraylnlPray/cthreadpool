@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <signal.h>
 
 #define NUM_THREADS 20
 #define EOK 0
@@ -43,16 +44,15 @@ void *worker_thread(void *arg)
     struct thread_info *tinfo = (struct thread_info*)arg;
     struct thread_pool *pool = tinfo->pool;
 
-    volatile int i = 0;
     printf("Worker #%d ready\n", tinfo->thread_idx);
     while (1)
     {
         pthread_mutex_lock(&pool->workload_mutex);
         while (pool->workload_fill_idx == pool->next_workload_idx)
         {
-            printf("Worker #%d going to sleep\n", tinfo->thread_idx);
+            printf("Worker #%d going to sleep, sig address is 0x%x\n", tinfo->thread_idx, &pool->sig_workload_available);
             pthread_cond_wait(&pool->sig_workload_available, &pool->workload_mutex);
-            printf("Worker #%d woke up, fill_idx is %d, next_idx is %d. i is %d\n", tinfo->thread_idx, pool->workload_fill_idx, pool->next_workload_idx, i);
+            printf("Worker #%d woke up, fill_idx is %d, next_idx is %d\n", tinfo->thread_idx, pool->workload_fill_idx, pool->next_workload_idx);
         }
         
         void *(*func)(void*) = pool->workloads[pool->next_workload_idx].func;
@@ -64,10 +64,12 @@ void *worker_thread(void *arg)
 
         pthread_mutex_unlock(&pool->workload_mutex);
         printf("Worker #%d starting work on function\n", tinfo->thread_idx);
+        tinfo->thread_has_work = 1;
         func(arg);
+        tinfo->thread_has_work = 0;
         printf("Worker #%d finished work on function\n", tinfo->thread_idx);
-
     }
+
     printf("Worker #%d finished\n", tinfo->thread_idx);
     return 0;
 }
@@ -124,6 +126,20 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
         goto out_cleanup_workloads;
     }
 
+    res = pthread_cond_init(&pool->sig_workload_available, NULL);
+    if (res != EOK)
+    {
+        printf("Failed to initialized cvar: %s\n", strerror(res));
+        goto out_cleanup_threads;
+    }
+
+    res = pthread_mutex_init(&pool->workload_mutex, NULL);
+    if (res != EOK)
+    {
+        printf("Failed to initialize mutex: %s\n", strerror(res));
+        goto out_cleanup_mutex;
+    }
+
     size_t tidx;
     for (tidx = 0; tidx < num_threads; tidx++)
     {
@@ -138,22 +154,20 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
             goto out_cleanup_threads;
         }
 
+        char tname[16]; // according to manpage the threadname can be max 16 characters
+        res = snprintf(tname, sizeof(tname), "Worker %d\0", tidx);
+        if (!res)
+        {
+            printf("Failed to format threadname: %s\n", strerror(res));
+        }
+        res = pthread_setname_np(tinfos[tidx].thread_handle, tname);
+        if (res != EOK)
+        {
+            printf("Failed to create thread #%d: %s\n", strerror(res));
+        }
+
         workloads[tidx].arg = NULL;
         workloads[tidx].func = NULL;
-    }
-
-    res = pthread_cond_init(&pool->sig_workload_available, NULL);
-    if (res != EOK)
-    {
-        printf("Failed to initialized cvar: %s\n", strerror(res));
-        goto out_cleanup_threads;
-    }
-
-    res = pthread_mutex_init(&pool->workload_mutex, NULL);
-    if (res != EOK)
-    {
-        printf("Failed to initialize mutex: %s\n", strerror(res));
-        goto out_cleanup_mutex;
     }
 
     pool->tinfos = tinfos;
@@ -211,9 +225,7 @@ void *test1(void *arg)
     while (1)
     {
         counter++;
-        // if (counter % 10000000ULL == 0)
-            // printf("test1 still running\n");
-        if (counter % 1000000000ULL == 0)
+        if (counter % 10000000000ULL == 0)
         {
             printf("test1 did %llu iterations\n", counter);
             break;
@@ -224,11 +236,47 @@ void *test1(void *arg)
     return 0;
 }
 
+int cancel = 0;
+void set_cancel_flag(int signum)
+{
+    cancel = 1;
+}
+
+struct thread_pool pool;
+long long int arg1 = 1;
+void add_workload_handler(int signum)
+{
+    add_workload(&pool, &test1, (void*)arg1);
+}
+
+// simulate some sort of workload that accepts incoming traffic and hands it over to the workers
+int handle_incoming(void)
+{
+    struct sigaction sigint_action = {0};
+    sigint_action.sa_handler = &set_cancel_flag;
+    if (sigaction(SIGINT, &sigint_action, NULL))
+    {
+        printf("Failed to set up SIGINT handler\n");
+        return -1;
+    }
+
+    struct sigaction add_workload_action = {0};
+    add_workload_action.sa_handler = &add_workload_handler;
+    if (sigaction(SIGUSR1, &add_workload_action, NULL))
+    {
+        printf("Failed to set up SIGUSR1 handler\n");
+        return -1;
+    }
+
+    while (cancel == 0) {}
+
+    return 0;
+}
+
 // TODO: Support cli argument for number of threads
 int main(void)
 {
     int num_threads = NUM_THREADS;
-    struct thread_pool pool;
     if (setup_thread_pool(&pool, num_threads) != EOK)
     {
         printf("Failed to setup thread pool\n");
@@ -237,10 +285,9 @@ int main(void)
 
     printf("Initialized thread pool with %d workers\n", num_threads);
 
-    long long int arg1 = 1;
-    add_workload(&pool, &test1, (void*)arg1);
+    handle_incoming();
 
-    wait_for_join(&pool, num_threads);
+    // wait_for_join(&pool, num_threads);
 
     return 0;
 }
