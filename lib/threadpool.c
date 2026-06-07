@@ -51,24 +51,19 @@ int add_workload(void * hThreadpool, void *(*func)(void*), void *arg)
         return -ENOMEM;
     }
 
-    printf("add_workload adding item\n");
     threadpool->workloads[threadpool->workload_fill_idx].arg = arg;
     threadpool->workloads[threadpool->workload_fill_idx].func = func;
     threadpool->workload_fill_idx++;
-    printf("add_workload fill_idx after incrementing is %d\n", threadpool->workload_fill_idx);
     threadpool->workload_fill_idx %= threadpool->num_threads;
-    printf("add_workload fill_idx after mod is %d, will signal now\n", threadpool->workload_fill_idx);
 
     pthread_cond_signal(&threadpool->sig_wakeup);
-
-    printf("add_workload, unlock mutex\n");
     pthread_mutex_unlock(&threadpool->workload_mutex);
+
     return 0;
 }
 
 void wait_for_join(void * hThreadpool)
 {
-    printf("Wait for join\n");
     if (!hThreadpool)
         return;
 
@@ -88,7 +83,6 @@ void wait_for_join(void * hThreadpool)
 
             pthread_join(threadpool->tinfos[i].thread_handle, NULL);
             threadpool->tinfos[i].joined = 1;
-            printf("Worker #%d joined\n", i);
             joined_threads++;
         }
     }
@@ -111,7 +105,6 @@ int setup_threadpool(void * hThreadpool, size_t num_threads)
     struct thread_info *tinfos = (struct thread_info *)calloc(num_threads, sizeof(struct thread_info));
     if (tinfos == NULL)
     {
-        printf("setup_thread_pool failed to allocate memory for threads\n");
         res = -ENOMEM;
         goto out_cleanup_tinfos;
     }
@@ -119,24 +112,17 @@ int setup_threadpool(void * hThreadpool, size_t num_threads)
     struct workload *workloads = (struct workload *)calloc(num_threads, sizeof(struct workload));
     if (workloads == NULL)
     {
-        printf("setup_thread_pool failed to allocate memory for workloads\n");
         res = -ENOMEM;
         goto out_cleanup_workloads;
     }
 
     res = pthread_cond_init(&threadpool->sig_wakeup, NULL);
     if (res != 0)
-    {
-        printf("Failed to initialized cvar: %s\n", strerror(res));
         goto out_cleanup_threads;
-    }
 
     res = pthread_mutex_init(&threadpool->workload_mutex, NULL);
     if (res != 0)
-    {
-        printf("Failed to initialize mutex: %s\n", strerror(res));
         goto out_cleanup_mutex;
-    }
 
     for (int tidx = 0; tidx < num_threads; tidx++)
     {
@@ -147,23 +133,14 @@ int setup_threadpool(void * hThreadpool, size_t num_threads)
 
         res = pthread_create(&tinfos[tidx].thread_handle, NULL, &worker_thread, &tinfos[tidx]);
         if (res)
-        {
-            printf("Failed to create thread #%d: %s\n", tidx, strerror(res));
             goto out_cleanup_threads;
-        }
+
         threadpool->num_threads++;
 
         char tname[16]; // according to manpage the threadname can be max 16 characters
         res = snprintf(tname, sizeof(tname), "Worker %d", tidx);
-        if (!res)
-        {
-            printf("Failed to format threadname #%d: %s\n", tidx, strerror(res));
-        }
-        res = pthread_setname_np(tinfos[tidx].thread_handle, tname);
-        if (res)
-        {
-            printf("Failed to create thread #%d: %s\n", tidx, strerror(res));
-        }
+        if (res != 0)
+            pthread_setname_np(tinfos[tidx].thread_handle, tname);
 
         workloads[tidx].arg = NULL;
         workloads[tidx].func = NULL;
@@ -203,14 +180,12 @@ void *worker_thread(void *arg)
 {
     if (arg == NULL)
     {
-        printf("Worker was not passed any argument\n");
         return NULL;
     }
 
     struct thread_info *tinfo = (struct thread_info *)arg;
     struct threadpool *pool = tinfo->pool;
 
-    printf("Worker #%d ready\n", tinfo->thread_idx);
     while (1)
     {
         pthread_mutex_lock(&pool->workload_mutex);
@@ -221,28 +196,21 @@ void *worker_thread(void *arg)
                 pthread_mutex_unlock(&pool->workload_mutex);
                 goto out;
             }
-            printf("Worker #%d going to sleep\n", tinfo->thread_idx);
             pthread_cond_wait(&pool->sig_wakeup, &pool->workload_mutex);
-            printf("Worker #%d woke up, fill_idx is %d, next_idx is %d\n", tinfo->thread_idx, pool->workload_fill_idx, pool->next_workload_idx);
         }
 
         void *(*func)(void *) = pool->workloads[pool->next_workload_idx].func;
         void *arg = pool->workloads[pool->next_workload_idx].arg;
         pool->next_workload_idx++;
-        printf("Worker #%d next_idx after incrementing is %d\n", tinfo->thread_idx, pool->next_workload_idx);
         pool->next_workload_idx %= pool->num_threads;
-        printf("Worker #%d next_idx after mod is %d\n", tinfo->thread_idx, pool->next_workload_idx);
 
         pthread_mutex_unlock(&pool->workload_mutex);
-        printf("Worker #%d starting work on function\n", tinfo->thread_idx);
         tinfo->thread_has_work = 1;
         func(arg);
         tinfo->thread_has_work = 0;
-        printf("Worker #%d finished work on function\n", tinfo->thread_idx);
     }
 
 out:
     tinfo->exited = 1;
-    printf("Worker #%d finished\n", tinfo->thread_idx);
     return 0;
 }
