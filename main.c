@@ -191,14 +191,11 @@ int setup_thread_pool(struct thread_pool *pool, size_t num_threads)
     res = EOK;
     goto out;
 
+out_cleanup_threads:
+    wait_for_join(pool, tidx + 1);
+
 out_cleanup_mutex:
     pthread_cond_destroy(&pool->sig_wakeup);
-
-out_cleanup_threads:
-    for (size_t i = 0; i < tidx; i++)
-    {
-        // TODO: Cleanup threads on error
-    }
 
 out_cleanup_workloads:
     if (workloads)
