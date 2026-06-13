@@ -20,6 +20,11 @@ void *test1(void *arg)
     return 0;
 }
 
+void on_worker_finished(void)
+{
+    printf("A worker finished running, can now add another workload\n");
+}
+
 int cancel = 0;
 void set_cancel_flag(int signum)
 {
@@ -61,11 +66,10 @@ int handle_incoming(void)
     return 0;
 }
 
-// TODO: Support cli argument for number of threads
 int main(void)
 {
     int num_threads = 5;
-    if (setup_threadpool(&hThreadpool, num_threads) != 0)
+    if (setup_threadpool(&hThreadpool, num_threads, on_worker_finished) != 0)
     {
         printf("Failed to setup thread pool\n");
         return -1;

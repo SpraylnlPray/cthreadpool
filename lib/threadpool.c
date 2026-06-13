@@ -31,9 +31,17 @@ struct threadpool
     pthread_cond_t sig_wakeup;
     int num_threads;
     int joining;
+    void (*on_worker_finished)(void);
 };
 
 static void *worker_thread(void *arg);
+
+static void on_worker_finished(struct threadpool *threadpool)
+{
+    if (!threadpool->on_worker_finished)
+        return;
+    threadpool->on_worker_finished();
+}
 
 int add_workload(void * hThreadpool, void *(*func)(void*), void *arg)
 {
@@ -100,7 +108,7 @@ void wait_for_join(void * hThreadpool)
     }
 }
 
-int setup_threadpool(void * hThreadpool, size_t num_threads)
+int setup_threadpool(void *hThreadpool, size_t num_threads, void (*on_worker_finished)(void))
 {
     int res = 0;
     if (!hThreadpool || num_threads == 0)
@@ -113,6 +121,7 @@ int setup_threadpool(void * hThreadpool, size_t num_threads)
     threadpool->joining = 0;
     threadpool->next_workload.arg = NULL;
     threadpool->next_workload.func = NULL;
+    threadpool->on_worker_finished = on_worker_finished;
 
     struct thread_info *tinfos = (struct thread_info *)calloc(num_threads, sizeof(struct thread_info));
     if (tinfos == NULL)
@@ -204,6 +213,7 @@ void *worker_thread(void *arg)
         pthread_mutex_lock(&pool->workload_mutex);
         tinfo->thread_has_work = 0;
         pthread_mutex_unlock(&pool->workload_mutex);
+        on_worker_finished(pool);
     }
 
 out:
