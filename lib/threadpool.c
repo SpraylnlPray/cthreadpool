@@ -17,49 +17,61 @@ struct thread_info
     struct threadpool *pool;
 };
 
-struct threadpool
-{
-    struct thread_info *tinfos;
-    struct workload *workloads;
-    pthread_mutex_t workload_mutex;
-    pthread_cond_t sig_wakeup;
-    int next_workload_idx;
-    int workload_fill_idx;
-    int num_threads;
-    int joining;
-};
-
 struct workload
 {
     void *(*func)(void *);
     void *arg;
 };
 
+struct threadpool
+{
+    struct thread_info *tinfos;
+    struct workload next_workload;
+    pthread_mutex_t workload_mutex;
+    pthread_cond_t sig_wakeup;
+    int num_threads;
+    int joining;
+};
+
 static void *worker_thread(void *arg);
 
 int add_workload(void * hThreadpool, void *(*func)(void*), void *arg)
 {
+    int ret = 0;
     if (!hThreadpool || !func || !arg)
-        return -EINVAL;
+    {
+        ret = -EINVAL;
+        goto out;
+    }
 
     struct threadpool *threadpool = (struct threadpool*)hThreadpool;
     pthread_mutex_lock(&threadpool->workload_mutex);
 
-    if (threadpool->workload_fill_idx == (threadpool->next_workload_idx - 1))
+    int has_available_thread = 0;
+    for (int i = 0 ; i < threadpool->num_threads; i++)
     {
-        // threadpool is full, either grow or (for now) return error
-        return -ENOMEM;
+        if (!threadpool->tinfos[i].thread_has_work)
+        {
+            has_available_thread = 1;
+            break;
+        }
+    }
+    if (!has_available_thread)
+    {
+        ret = -ENOMEM;
+        goto out_unlock;
     }
 
-    threadpool->workloads[threadpool->workload_fill_idx].arg = arg;
-    threadpool->workloads[threadpool->workload_fill_idx].func = func;
-    threadpool->workload_fill_idx++;
-    threadpool->workload_fill_idx %= threadpool->num_threads;
+    threadpool->next_workload.arg = arg;
+    threadpool->next_workload.func = func;
 
     pthread_cond_signal(&threadpool->sig_wakeup);
+
+out_unlock:
     pthread_mutex_unlock(&threadpool->workload_mutex);
 
-    return 0;
+out:
+    return ret;
 }
 
 void wait_for_join(void * hThreadpool)
@@ -98,22 +110,15 @@ int setup_threadpool(void * hThreadpool, size_t num_threads)
     }
 
     struct threadpool *threadpool = (struct threadpool*)hThreadpool;
-    threadpool->next_workload_idx = 0;
-    threadpool->workload_fill_idx = 0;
     threadpool->joining = 0;
+    threadpool->next_workload.arg = NULL;
+    threadpool->next_workload.func = NULL;
 
     struct thread_info *tinfos = (struct thread_info *)calloc(num_threads, sizeof(struct thread_info));
     if (tinfos == NULL)
     {
         res = -ENOMEM;
         goto out_cleanup_tinfos;
-    }
-
-    struct workload *workloads = (struct workload *)calloc(num_threads, sizeof(struct workload));
-    if (workloads == NULL)
-    {
-        res = -ENOMEM;
-        goto out_cleanup_workloads;
     }
 
     res = pthread_cond_init(&threadpool->sig_wakeup, NULL);
@@ -141,13 +146,9 @@ int setup_threadpool(void * hThreadpool, size_t num_threads)
         res = snprintf(tname, sizeof(tname), "Worker %d", tidx);
         if (res != 0)
             pthread_setname_np(tinfos[tidx].thread_handle, tname);
-
-        workloads[tidx].arg = NULL;
-        workloads[tidx].func = NULL;
     }
 
     threadpool->tinfos = tinfos;
-    threadpool->workloads = workloads;
 
     res = 0;
     goto out;
@@ -157,13 +158,6 @@ out_cleanup_threads:
 
 out_cleanup_mutex:
     pthread_cond_destroy(&threadpool->sig_wakeup);
-
-out_cleanup_workloads:
-    if (workloads)
-    {
-        free(workloads);
-        threadpool->workloads = NULL;
-    }
 
 out_cleanup_tinfos:
     if (tinfos)
@@ -179,9 +173,7 @@ out:
 void *worker_thread(void *arg)
 {
     if (arg == NULL)
-    {
         return NULL;
-    }
 
     struct thread_info *tinfo = (struct thread_info *)arg;
     struct threadpool *pool = tinfo->pool;
@@ -189,7 +181,7 @@ void *worker_thread(void *arg)
     while (1)
     {
         pthread_mutex_lock(&pool->workload_mutex);
-        while (pool->workload_fill_idx == pool->next_workload_idx || pool->joining)
+        while ((pool->next_workload.func == NULL && pool->next_workload.arg == NULL) || pool->joining)
         {
             if (pool->joining)
             {
@@ -199,15 +191,19 @@ void *worker_thread(void *arg)
             pthread_cond_wait(&pool->sig_wakeup, &pool->workload_mutex);
         }
 
-        void *(*func)(void *) = pool->workloads[pool->next_workload_idx].func;
-        void *arg = pool->workloads[pool->next_workload_idx].arg;
-        pool->next_workload_idx++;
-        pool->next_workload_idx %= pool->num_threads;
+        void *(*func)(void *) = pool->next_workload.func;
+        void *arg = pool->next_workload.arg;
+        pool->next_workload.func = NULL;
+        pool->next_workload.arg = NULL;
 
-        pthread_mutex_unlock(&pool->workload_mutex);
         tinfo->thread_has_work = 1;
+        pthread_mutex_unlock(&pool->workload_mutex);
+
         func(arg);
+
+        pthread_mutex_lock(&pool->workload_mutex);
         tinfo->thread_has_work = 0;
+        pthread_mutex_unlock(&pool->workload_mutex);
     }
 
 out:

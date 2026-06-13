@@ -3,18 +3,15 @@
 
 #include "threadpool.h"
 
-
 void *test1(void *arg)
 {
     long long int iarg = (long long int)arg;
-    printf("This is test1, argument is %d\n", iarg);
     volatile unsigned long long counter = 0;
     while (1)
     {
         counter++;
         if (counter % 10000000000ULL == 0)
         {
-            printf("test1 did %llu iterations\n", counter);
             break;
         }
     }
@@ -33,7 +30,11 @@ int hThreadpool;
 long long int arg1 = 1;
 void add_workload_handler(int signum)
 {
-    add_workload(&hThreadpool, &test1, (void*)arg1);
+    int res = add_workload(&hThreadpool, &test1, (void*)arg1);
+    if (res)
+    {
+        printf("Failed to add workload\n");
+    }
 }
 
 // simulate some sort of workload that accepts incoming traffic and hands it over to the workers
@@ -63,7 +64,7 @@ int handle_incoming(void)
 // TODO: Support cli argument for number of threads
 int main(void)
 {
-    int num_threads = 20;
+    int num_threads = 5;
     if (setup_threadpool(&hThreadpool, num_threads) != 0)
     {
         printf("Failed to setup thread pool\n");

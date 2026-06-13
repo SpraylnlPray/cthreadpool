@@ -4,7 +4,7 @@ LIBS := threadpool
 LPATH := ../lib
 
 %.bin: %.c
-	$(CC) $< -g -O0 -I$(INCLUDES) -l$(LIBS) -L$(INCLUDES) -o $@
+	$(CC) $< -O0 -I$(INCLUDES) -l$(LIBS) -L$(INCLUDES) -o $@
 
 clean:
 	rm $(TARGET)
